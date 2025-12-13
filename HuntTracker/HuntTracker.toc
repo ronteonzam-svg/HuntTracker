@@ -2,6 +2,6 @@
 ## Title: HuntTracker
 ## Notes: Автоматически ставит нужное выслеживание охотника под цель
 ## Author: Ubivatb
-## Version: 2.1
+## Version: 2.2
 
 HuntTracker.lua
