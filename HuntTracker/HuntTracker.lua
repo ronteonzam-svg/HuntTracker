@@ -3,17 +3,17 @@ local HuntTracker = CreateFrame("Frame", "HuntTrackerFrame")
 -- Проверяем класс персонажа
 local _, playerClass = UnitClass("player")
 if playerClass ~= "HUNTER" then
-    return -- Если не охотник, выходим и не грузим аддон
+    return
 end
 
--- SavedVariables (будет сохранено между /reload и выходом)
-local settings -- ссылка на HuntTrackerDB после загрузки
+-- Настройки
+local settings
 local defaults = {
     enabled = true,
     minimapButtonAngle = 200,
 }
 
--- Приводим локализованные типы существ к общему ключу
+-- Таблицы типов существ
 local creatureTypeKey = {
     ["Beast"] = "Beast", ["Humanoid"] = "Humanoid", ["Undead"] = "Undead",
     ["Elemental"] = "Elemental", ["Demon"] = "Demon", ["Giant"] = "Giant",
@@ -36,14 +36,28 @@ local trackingNamePatterns = {
 }
 
 local trackIndexByKey = {}
-local wantedTrackingIndex = nil
-local retryTimer = 0
+
+-- === ПЕРЕМЕННЫЕ СОСТОЯНИЯ ===
+local savedTrackingIndex = nil 
+local targetTrackingID = nil
+local checkTimer = 0
+
+-- === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+
+local function GetCurrentTrackingID()
+    local count = GetNumTrackingTypes()
+    for i = 1, count do
+        local _, _, active = GetTrackingInfo(i)
+        if active then return i end
+    end
+    return 0 
+end
 
 local function BuildTrackingTable()
     wipe(trackIndexByKey)
     local count = GetNumTrackingTypes()
     for i = 1, count do
-        local name, texture, active, category = GetTrackingInfo(i)
+        local name, _, _, category = GetTrackingInfo(i)
         if name and category == "spell" then
             local lowerName = string.lower(name)
             for key, patterns in pairs(trackingNamePatterns) do
@@ -60,51 +74,41 @@ end
 
 local function GetWantedIndexForTarget()
     if not UnitExists("target") then return nil end
-    if UnitIsFriend("player", "target") then return nil end
     if UnitIsDead("target") then return nil end
+    if not UnitCanAttack("player", "target") then return nil end
+
     local cType = UnitCreatureType("target")
     if not cType then return nil end
+    
     local key = creatureTypeKey[cType]
     if not key then return nil end
+    
     return trackIndexByKey[key]
 end
 
-local function TrySetTracking(idx)
-    if not idx then return false end
-    local currentTexture = GetTrackingTexture()
-    local _, wantedTexture = GetTrackingInfo(idx)
-    if currentTexture == wantedTexture then
-        wantedTrackingIndex = nil
-        return true
-    end
-    SetTracking(idx)
-    currentTexture = GetTrackingTexture()
-    if currentTexture == wantedTexture then
-        wantedTrackingIndex = nil
-        return true
-    else
-        wantedTrackingIndex = idx
-        return false
-    end
-end
+-- === ОСНОВНАЯ ЛОГИКА ===
 
-local function UpdateTracking()
+local function UpdateLogic()
     if not settings or not settings.enabled then return end
-    local idx = GetWantedIndexForTarget()
-    if idx then
-        TrySetTracking(idx)
+
+    local currentID = GetCurrentTrackingID()
+    local wantedID = GetWantedIndexForTarget()
+
+    if wantedID then
+        if savedTrackingIndex == nil then
+            savedTrackingIndex = currentID 
+        end
+        targetTrackingID = wantedID
     else
-        wantedTrackingIndex = nil
+        if savedTrackingIndex ~= nil then
+            targetTrackingID = savedTrackingIndex
+        else
+            targetTrackingID = nil
+        end
     end
 end
 
-local function RetryTracking()
-    if wantedTrackingIndex and settings.enabled then
-        TrySetTracking(wantedTrackingIndex)
-    end
-end
-
--- Создание миникарт кнопки
+-- === МИНИКАРТА ===
 local minimapButton = CreateFrame("Button", "HuntTrackerMinimapButton", Minimap)
 minimapButton:SetFrameStrata("MEDIUM")
 minimapButton:SetSize(31, 31)
@@ -112,22 +116,18 @@ minimapButton:SetFrameLevel(8)
 minimapButton:RegisterForClicks("RightButtonUp")
 minimapButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
 
--- Иконка специализации Стрельба
 local icon = minimapButton:CreateTexture(nil, "BACKGROUND")
 icon:SetSize(20, 20)
 icon:SetPoint("CENTER", 0, 1)
 icon:SetTexture("Interface\\Icons\\Ability_Hunter_FocusedAim")
 
--- Граница кнопки
 local overlay = minimapButton:CreateTexture(nil, "OVERLAY")
 overlay:SetSize(53, 53)
 overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 overlay:SetPoint("TOPLEFT")
 
-local minimapButtonAngle = defaults.minimapButtonAngle
-
 local function UpdateMinimapButtonPosition()
-    local angle = math.rad(minimapButtonAngle)
+    local angle = math.rad(settings.minimapButtonAngle)
     local x = math.cos(angle) * 80
     local y = math.sin(angle) * 80
     minimapButton:SetPoint("CENTER", Minimap, "CENTER", x, y)
@@ -138,10 +138,11 @@ local function UpdateMinimapIcon()
         icon:SetDesaturated(false)
     else
         icon:SetDesaturated(true)
+        savedTrackingIndex = nil 
+        targetTrackingID = nil
     end
 end
 
--- ПКМ - включить/выключить
 minimapButton:SetScript("OnClick", function(self, button)
     if button == "RightButton" then
         if not settings then return end
@@ -149,104 +150,108 @@ minimapButton:SetScript("OnClick", function(self, button)
         UpdateMinimapIcon()
         if settings.enabled then
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00HuntTracker: Включено|r")
+            UpdateLogic()
         else
             DEFAULT_CHAT_FRAME:AddMessage("|cffff0000HuntTracker: Выключено|r")
-            wantedTrackingIndex = nil
         end
     end
 end)
 
--- Тултип
 minimapButton:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_LEFT")
     GameTooltip:AddLine("HuntTracker")
-    GameTooltip:AddLine(" ")
     if settings.enabled then
-        GameTooltip:AddLine("|cff00ff00Автоотслеживание: ВКЛ|r")
+        GameTooltip:AddLine("|cff00ff00ВКЛЮЧЕНО|r")
     else
-        GameTooltip:AddLine("|cffff0000Автоотслеживание: ВЫКЛ|r")
+        GameTooltip:AddLine("|cffff0000ВЫКЛЮЧЕНО|r")
     end
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddDoubleLine("|cffffffffПКМ:|r", "Вкл/Выкл", 1, 1, 1, 1, 1, 1)
-    GameTooltip:AddDoubleLine("|cffffffffShift+ЛКМ:|r", "Перетащить", 1, 1, 1, 1, 1, 1)
     GameTooltip:Show()
 end)
 
-minimapButton:SetScript("OnLeave", function(self)
-    GameTooltip:Hide()
-end)
+minimapButton:SetScript("OnLeave", function(self) GameTooltip:Hide() end)
 
--- Перетаскивание
 minimapButton:SetScript("OnMouseDown", function(self, button)
-    if button == "LeftButton" and IsShiftKeyDown() then
-        self.dragging = true
-    end
+    if button == "LeftButton" and IsShiftKeyDown() then self.dragging = true end
 end)
 
 minimapButton:SetScript("OnMouseUp", function(self, button)
     if button == "LeftButton" then
         self.dragging = false
-        if settings then
-            settings.minimapButtonAngle = minimapButtonAngle
-        end
+        if settings then settings.minimapButtonAngle = math.deg(math.atan2(GetCursorPosition())) end
     end
 end)
 
--- OnUpdate
+-- === ON UPDATE: СЕРДЦЕ АДДОНА (SILENT MODE) ===
 minimapButton:SetScript("OnUpdate", function(self, elapsed)
     if self.dragging then
         local mx, my = Minimap:GetCenter()
         local px, py = GetCursorPosition()
         local scale = Minimap:GetEffectiveScale()
         px, py = px / scale, py / scale
-        minimapButtonAngle = math.deg(math.atan2(py - my, px - mx))
+        local angle = math.deg(math.atan2(py - my, px - mx))
+        settings.minimapButtonAngle = angle
         UpdateMinimapButtonPosition()
     end
-    
-    if wantedTrackingIndex and settings.enabled then
-        retryTimer = retryTimer + elapsed
-        if retryTimer >= 0.2 then
-            retryTimer = 0
-            RetryTracking()
+
+    if not settings or not settings.enabled then return end
+
+    if targetTrackingID then
+        checkTimer = checkTimer + elapsed
+        if checkTimer >= 0.5 then
+            checkTimer = 0
+            
+            local currentID = GetCurrentTrackingID()
+            
+            if currentID ~= targetTrackingID then
+                -- Глушим ошибки UI и Звуки
+                local origSFX = GetCVar("Sound_EnableSFX")
+                UIErrorsFrame:UnregisterEvent("UI_ERROR_MESSAGE")
+                SetCVar("Sound_EnableSFX", "0") -- Выключаем звук ошибок
+                
+                -- Пытаемся сменить
+                if targetTrackingID == 0 then
+                    if currentID ~= 0 then SetTracking(currentID) end
+                    savedTrackingIndex = nil
+                    targetTrackingID = nil
+                else
+                    SetTracking(targetTrackingID)
+                end
+                
+                -- Возвращаем все обратно
+                SetCVar("Sound_EnableSFX", origSFX)
+                UIErrorsFrame:RegisterEvent("UI_ERROR_MESSAGE")
+            else
+                if savedTrackingIndex == currentID then
+                    savedTrackingIndex = nil
+                    targetTrackingID = nil 
+                end
+            end
         end
     else
-        retryTimer = 0
+        checkTimer = 0
     end
 end)
 
+-- === СОБЫТИЯ ===
 HuntTracker:SetScript("OnEvent", function(self, event, unit)
-    if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
-        -- Инициализация SavedVariables
+    if event == "PLAYER_LOGIN" then
         if not HuntTrackerDB then HuntTrackerDB = {} end
         for k, v in pairs(defaults) do
-            if HuntTrackerDB[k] == nil then
-                HuntTrackerDB[k] = v
-            end
+            if HuntTrackerDB[k] == nil then HuntTrackerDB[k] = v end
         end
         settings = HuntTrackerDB
-
-        -- применяем сохранённые значения
-        minimapButtonAngle = settings.minimapButtonAngle or defaults.minimapButtonAngle
-
         BuildTrackingTable()
         UpdateMinimapButtonPosition()
         UpdateMinimapIcon()
-    elseif event == "UNIT_SPELLCAST_SUCCEEDED" or event == "UNIT_SPELLCAST_STOP" or 
-           event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
-        if unit == "player" and settings.enabled then
-            RetryTracking()
-        end
-    else
-        UpdateTracking()
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        BuildTrackingTable()
+    elseif event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_REGEN_ENABLED" then
+        UpdateLogic()
+        checkTimer = 1 -- форсируем немедленную проверку
     end
 end)
 
 HuntTracker:RegisterEvent("PLAYER_LOGIN")
 HuntTracker:RegisterEvent("PLAYER_ENTERING_WORLD")
 HuntTracker:RegisterEvent("PLAYER_TARGET_CHANGED")
-HuntTracker:RegisterEvent("PLAYER_REGEN_DISABLED")
 HuntTracker:RegisterEvent("PLAYER_REGEN_ENABLED")
-HuntTracker:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-HuntTracker:RegisterEvent("UNIT_SPELLCAST_STOP")
-HuntTracker:RegisterEvent("UNIT_SPELLCAST_FAILED")
-HuntTracker:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
