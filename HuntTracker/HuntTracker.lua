@@ -1,6 +1,5 @@
 local HuntTracker = CreateFrame("Frame", "HuntTrackerFrame")
 
--- Проверяем класс персонажа
 local _, playerClass = UnitClass("player")
 if playerClass ~= "HUNTER" then return end
 
@@ -9,6 +8,24 @@ if playerClass ~= "HUNTER" then return end
 -- =========================================================
 local addonName, addon = ...
 local L = addon.L
+
+-- Кэшируем часто используемые API
+local UnitExists           = UnitExists
+local UnitIsDead           = UnitIsDead
+local UnitCanAttack        = UnitCanAttack
+local UnitCreatureType     = UnitCreatureType
+local GetNumTrackingTypes  = GetNumTrackingTypes
+local GetTrackingInfo      = GetTrackingInfo
+local SetTracking          = SetTracking
+local GetCursorPosition    = GetCursorPosition
+local math_sin, math_cos   = math.sin, math.cos
+local math_rad, math_deg   = math.rad, math.deg
+local math_atan2           = math.atan2
+local string_lower         = string.lower
+local string_find          = string.find
+local GetSpellCooldown       = GetSpellCooldown
+
+local TRACK_ATTEMPT_INTERVAL = 0.05
 
 -- =========================================================
 -- ЗНАЧЕНИЯ ПО УМОЛЧАНИЮ
@@ -19,9 +36,6 @@ local defaults = {
     onlyHostile = true,
     minimapButtonAngle = 225,
 }
-
--- Вместо локальной settings будем обращаться к HuntTrackerDB напрямую, 
--- чтобы исключить путаницу ссылок.
 
 local creatureTypeKey = {
     ["Beast"] = "Beast", ["Humanoid"] = "Humanoid", ["Undead"] = "Undead",
@@ -45,90 +59,32 @@ local trackingNamePatterns = {
 }
 
 local trackIndexByKey = {}
---local savedTrackingIndex = nil 
 local targetTrackingID = nil
 local checkTimer = 0
+local isDragging = false
+local suppressErrors = false
+
+local lastCastTime = 0 -- Запоминаем время последнего нажатия
 
 -- =========================================================
--- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+-- ПЕРЕХВАТЧИК ОШИБОК (новая, более надёжная версия)
 -- =========================================================
+local suppressedErrorMessages = {
+    [ERR_SPELL_COOLDOWN] = true,
+    [SPELL_FAILED_SPELL_IN_PROGRESS] = true,
+}
 
-local function GetCurrentTrackingID()
-    local count = GetNumTrackingTypes()
-    for i = 1, count do
-        local _, _, active = GetTrackingInfo(i)
-        if active then return i end
-    end
-    return 0 
-end
-
-local function BuildTrackingTable()
-    wipe(trackIndexByKey)
-    local count = GetNumTrackingTypes()
-    for i = 1, count do
-        local name, _, _, category = GetTrackingInfo(i)
-        if name and category == "spell" then
-            local lowerName = string.lower(name)
-            for key, patterns in pairs(trackingNamePatterns) do
-                for _, pat in ipairs(patterns) do
-                    if string.find(lowerName, pat) then
-                        trackIndexByKey[key] = i
-                        break
-                    end
-                end
-            end
+if not UIErrorsFrame.__HuntTrackerAddMessageHooked then
+    local originalAddMessage = UIErrorsFrame.AddMessage
+    UIErrorsFrame.AddMessage = function(self, message, ...)
+        -- Если аддон пытается сменить трекинг и ошибка в нашем "чёрном списке", просто ничего не делаем
+        if suppressErrors and suppressedErrorMessages[message] then
+            return
         end
+        -- В остальных случаях вызываем оригинальную функцию, чтобы другие ошибки отображались
+        return originalAddMessage(self, message, ...)
     end
-end
-
-local function GetWantedIndexForTarget()
-    if not UnitExists("target") then return nil end
-    if UnitIsDead("target") then return nil end
-    
-    -- Используем HuntTrackerDB напрямую
-    if HuntTrackerDB.onlyHostile and not UnitCanAttack("player", "target") then 
-        return nil 
-    end
-
-    local cType = UnitCreatureType("target")
-    if not cType then return nil end
-    
-    local key = creatureTypeKey[cType]
-    if not key then return nil end
-    
-    return trackIndexByKey[key]
-end
-
--- =========================================================
--- ЛОГИКА
--- =========================================================
-
-local function UpdateLogic()
-    if not HuntTrackerDB or not HuntTrackerDB.enabled then return end
-
-    local currentID = GetCurrentTrackingID()
-    local wantedID = GetWantedIndexForTarget()
-
-    if wantedID then
-        -- Если мы еще ничего не запомнили в базе, запоминаем текущее
-        if HuntTrackerDB.savedTrackingIndex == nil then
-            HuntTrackerDB.savedTrackingIndex = currentID 
-        end
-        targetTrackingID = wantedID
-    else
-        -- Цели нет или она нам не интересна
-        if HuntTrackerDB.autoReturn then
-            if HuntTrackerDB.savedTrackingIndex ~= nil then
-                targetTrackingID = HuntTrackerDB.savedTrackingIndex
-            else
-                targetTrackingID = nil
-            end
-        else
-            -- Если автовозврат выключен, стираем память
-            HuntTrackerDB.savedTrackingIndex = nil
-            targetTrackingID = nil
-        end
-    end
+    UIErrorsFrame.__HuntTrackerAddMessageHooked = true
 end
 
 -- =========================================================
@@ -151,13 +107,196 @@ overlay:SetSize(53, 53)
 overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 overlay:SetPoint("TOPLEFT")
 
+-- =========================================================
+-- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+-- =========================================================
+local function PrintStatus(key)
+    DEFAULT_CHAT_FRAME:AddMessage(L[key])
+end
+
+local function GetCurrentTrackingID()
+    local count = GetNumTrackingTypes()
+    for i = 1, count do
+        local _, _, active = GetTrackingInfo(i)
+        if active then
+            return i
+        end
+    end
+    return 0
+end
+
+local function BuildTrackingTable()
+    wipe(trackIndexByKey)
+    local count = GetNumTrackingTypes()
+    for i = 1, count do
+        local name, _, _, category = GetTrackingInfo(i)
+        if name and category == "spell" then
+            local lowerName = string_lower(name)
+            for key, patterns in pairs(trackingNamePatterns) do
+                for _, pat in ipairs(patterns) do
+                    if string_find(lowerName, pat) then
+                        trackIndexByKey[key] = i
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function GetWantedIndexForTarget()
+    if not UnitExists("target") then return nil end
+    if UnitIsDead("target") then return nil end
+    if HuntTrackerDB.onlyHostile and not UnitCanAttack("player", "target") then
+        return nil
+    end
+
+    local cType = UnitCreatureType("target")
+    if not cType then return nil end
+
+    local key = creatureTypeKey[cType]
+    if not key then return nil end
+
+    return trackIndexByKey[key]
+end
+
+-- =========================================================
+-- УПРАВЛЕНИЕ ONUPDATE
+-- =========================================================
+local MinimapButtonOnUpdate
+
+local function SetOnUpdate(enabled)
+    if enabled then
+        if not minimapButton:GetScript("OnUpdate") then
+            minimapButton:SetScript("OnUpdate", MinimapButtonOnUpdate)
+        end
+    else
+        minimapButton:SetScript("OnUpdate", nil)
+        checkTimer = 0
+    end
+end
+
+local function RefreshOnUpdateState()
+    if HuntTrackerDB and HuntTrackerDB.enabled and (isDragging or targetTrackingID) then
+        SetOnUpdate(true)
+    else
+        SetOnUpdate(false)
+    end
+end
+
+local function SetTargetTracking(id)
+    targetTrackingID = id
+    suppressErrors = id ~= nil -- Включаем или выключаем глушилку
+    checkTimer = 0
+    RefreshOnUpdateState()
+end
+
+local function ApplyTrackingChange()
+    if not targetTrackingID then return end
+
+    -- 1. ЗАЩИТА ОТ ДВОЙНОГО НАЖАТИЯ (НОВОЕ)
+    -- Если мы нажали кнопку меньше 1 секунды назад, не пытаемся снова,
+    -- даже если игра говорит, что КД нет. Даем серверу время отреагировать.
+    if (GetTime() - lastCastTime) < 1.0 then
+        return
+    end
+
+    local currentID = GetCurrentTrackingID()
+
+    -- Если уже включено то, что нужно
+    if currentID == targetTrackingID then
+        if HuntTrackerDB.savedTrackingIndex == currentID then
+            HuntTrackerDB.savedTrackingIndex = nil
+        end
+        SetTargetTracking(nil)
+        return
+    end
+
+    -- 2. ПРОВЕРКА КУЛДАУНА (ИЗ ПРОШЛОГО ШАГА)
+    local checkID = targetTrackingID
+    if checkID == 0 then checkID = currentID end
+
+    if checkID and checkID > 0 then
+        local name = GetTrackingInfo(checkID)
+        if name then
+            local start, duration, enabled = GetSpellCooldown(name)
+            if start and duration and (start > 0 and duration > 0) then
+                return -- Ждем окончания КД
+            end
+        end
+    end
+
+    -- 3. ПРИМЕНЕНИЕ
+    local origSFX = GetCVar("Sound_EnableSFX")
+    local hadSFX = origSFX ~= "0"
+    if hadSFX then SetCVar("Sound_EnableSFX", "0") end
+
+    if targetTrackingID == 0 then
+        if currentID ~= 0 then
+            SetTracking(currentID)
+            lastCastTime = GetTime() -- Запоминаем время нажатия
+        end
+        HuntTrackerDB.savedTrackingIndex = nil
+        SetTargetTracking(nil)
+    else
+        SetTracking(targetTrackingID)
+        lastCastTime = GetTime() -- Запоминаем время нажатия
+    end
+
+    if hadSFX then SetCVar("Sound_EnableSFX", origSFX) end
+end
+
+
+
+-- =========================================================
+-- ЛОГИКА
+-- =========================================================
+local function UpdateLogic()
+    if not HuntTrackerDB or not HuntTrackerDB.enabled then
+        SetTargetTracking(nil)
+        return
+    end
+
+    local currentID = GetCurrentTrackingID()
+    local wantedID = GetWantedIndexForTarget()
+
+    if wantedID then
+        if HuntTrackerDB.savedTrackingIndex == nil then
+            HuntTrackerDB.savedTrackingIndex = currentID
+        end
+
+        if wantedID ~= currentID then
+            SetTargetTracking(wantedID)
+        else
+            SetTargetTracking(nil)
+        end
+    else
+        if HuntTrackerDB.autoReturn and HuntTrackerDB.savedTrackingIndex ~= nil then
+            if HuntTrackerDB.savedTrackingIndex ~= currentID then
+                SetTargetTracking(HuntTrackerDB.savedTrackingIndex)
+            else
+                HuntTrackerDB.savedTrackingIndex = nil
+                SetTargetTracking(nil)
+            end
+        else
+            HuntTrackerDB.savedTrackingIndex = nil
+            SetTargetTracking(nil)
+        end
+    end
+end
+
+-- =========================================================
+-- ФУНКЦИИ МИНИКАРТЫ
+-- =========================================================
 local function UpdateMinimapButtonPosition()
     if not HuntTrackerDB then return end
-    if not HuntTrackerDB.minimapButtonAngle then HuntTrackerDB.minimapButtonAngle = defaults.minimapButtonAngle end
-    
-    local angle = math.rad(HuntTrackerDB.minimapButtonAngle)
-    local x = math.cos(angle) * 80
-    local y = math.sin(angle) * 80
+    if not HuntTrackerDB.minimapButtonAngle then
+        HuntTrackerDB.minimapButtonAngle = defaults.minimapButtonAngle
+    end
+
+    local angle = math_rad(HuntTrackerDB.minimapButtonAngle)
+    local x = math_cos(angle) * 80
+    local y = math_sin(angle) * 80
     minimapButton:SetPoint("CENTER", Minimap, "CENTER", x, y)
 end
 
@@ -167,19 +306,19 @@ local function UpdateMinimapIcon()
         icon:SetDesaturated(false)
     else
         icon:SetDesaturated(true)
-        HuntTrackerDB.savedTrackingIndex = nil -- Сброс в базе
-        targetTrackingID = nil
+        HuntTrackerDB.savedTrackingIndex = nil
+        SetTargetTracking(nil)
     end
 end
 
 -- =========================================================
--- МЕНЮ НАСТРОЕК (GUI)
+-- МЕНЮ НАСТРОЕК
 -- =========================================================
 local configFrame = nil
 
 local function CreateConfigMenu()
     if configFrame then return end
-    
+
     configFrame = CreateFrame("Frame", "HuntTrackerConfigFrame", UIParent)
     configFrame:SetSize(300, 220)
     configFrame:SetPoint("CENTER")
@@ -200,44 +339,42 @@ local function CreateConfigMenu()
     title:SetPoint("TOP", 0, -20)
     title:SetText(L["MENU_TITLE"])
 
-    -- 1. Enable
     local chkEnable = CreateFrame("CheckButton", "HuntTrackerOptEnable", configFrame, "UICheckButtonTemplate")
     chkEnable:SetPoint("TOPLEFT", 30, -50)
-    _G[chkEnable:GetName().."Text"]:SetText(L["OPT_ENABLE"])
-    chkEnable:SetChecked(HuntTrackerDB.enabled) -- Читаем из DB
+    _G[chkEnable:GetName() .. "Text"]:SetText(L["OPT_ENABLE"])
+    chkEnable:SetChecked(HuntTrackerDB.enabled)
     chkEnable:SetScript("OnClick", function(self)
-        HuntTrackerDB.enabled = not not self:GetChecked() -- Пишем в DB
+        HuntTrackerDB.enabled = not not self:GetChecked()
         if HuntTrackerDB.enabled then
-            DEFAULT_CHAT_FRAME:AddMessage(L["ENABLED"])
+            PrintStatus("ENABLED")
             UpdateLogic()
         else
-            DEFAULT_CHAT_FRAME:AddMessage(L["DISABLED"])
+            PrintStatus("DISABLED")
         end
         UpdateMinimapIcon()
+        RefreshOnUpdateState()
     end)
     configFrame.chkEnable = chkEnable
 
-    -- 2. Hostile Only
     local chkHostile = CreateFrame("CheckButton", "HuntTrackerOptHostile", configFrame, "UICheckButtonTemplate")
     chkHostile:SetPoint("TOPLEFT", 30, -80)
-    _G[chkHostile:GetName().."Text"]:SetText(L["OPT_ONLYHOSTILE"])
-    chkHostile:SetChecked(HuntTrackerDB.onlyHostile) -- Читаем из DB
+    _G[chkHostile:GetName() .. "Text"]:SetText(L["OPT_ONLYHOSTILE"])
+    chkHostile:SetChecked(HuntTrackerDB.onlyHostile)
     chkHostile:SetScript("OnClick", function(self)
-        HuntTrackerDB.onlyHostile = not not self:GetChecked() -- Пишем в DB
-        UpdateLogic() 
+        HuntTrackerDB.onlyHostile = not not self:GetChecked()
+        UpdateLogic()
     end)
     configFrame.chkHostile = chkHostile
-    
-    -- 3. Auto Return
+
     local chkReturn = CreateFrame("CheckButton", "HuntTrackerOptReturn", configFrame, "UICheckButtonTemplate")
     chkReturn:SetPoint("TOPLEFT", 30, -110)
-    _G[chkReturn:GetName().."Text"]:SetText(L["OPT_AUTORETURN"])
-    chkReturn:SetChecked(HuntTrackerDB.autoReturn) -- Читаем из DB
+    _G[chkReturn:GetName() .. "Text"]:SetText(L["OPT_AUTORETURN"])
+    chkReturn:SetChecked(HuntTrackerDB.autoReturn)
     chkReturn:SetScript("OnClick", function(self)
-        HuntTrackerDB.autoReturn = not not self:GetChecked() -- Пишем в DB
+        HuntTrackerDB.autoReturn = not not self:GetChecked()
     end)
     configFrame.chkReturn = chkReturn
-    
+
     local desc = configFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     desc:SetPoint("TOPLEFT", 40, -150)
     desc:SetWidth(220)
@@ -256,26 +393,22 @@ local function ToggleConfigMenu()
     if configFrame:IsShown() then
         configFrame:Hide()
     else
-        -- ОБЯЗАТЕЛЬНО: Обновляем галочки визуально перед показом окна
-        -- Это исправляет баг "залипания" старых значений
         if configFrame.chkEnable then configFrame.chkEnable:SetChecked(HuntTrackerDB.enabled) end
         if configFrame.chkHostile then configFrame.chkHostile:SetChecked(HuntTrackerDB.onlyHostile) end
         if configFrame.chkReturn then configFrame.chkReturn:SetChecked(HuntTrackerDB.autoReturn) end
-        
         configFrame:Show()
     end
 end
 
 SLASH_HUNTTRACKER1 = "/ht"
 SLASH_HUNTTRACKER2 = "/hunttracker"
-SlashCmdList["HUNTTRACKER"] = function(msg)
+SlashCmdList["HUNTTRACKER"] = function()
     ToggleConfigMenu()
 end
 
 -- =========================================================
 -- УПРАВЛЕНИЕ МИНИКАРТОЙ
 -- =========================================================
-
 minimapButton:SetScript("OnClick", function(self, button)
     if button == "RightButton" then
         if IsShiftKeyDown() then
@@ -283,12 +416,12 @@ minimapButton:SetScript("OnClick", function(self, button)
             HuntTrackerDB.enabled = not HuntTrackerDB.enabled
             UpdateMinimapIcon()
             if HuntTrackerDB.enabled then
-                DEFAULT_CHAT_FRAME:AddMessage(L["ENABLED"])
+                PrintStatus("ENABLED")
                 UpdateLogic()
             else
-                DEFAULT_CHAT_FRAME:AddMessage(L["DISABLED"])
+                PrintStatus("DISABLED")
+                SetTargetTracking(nil)
             end
-            -- Обновляем чекбокс, если окно открыто
             if configFrame and configFrame:IsShown() then
                 configFrame.chkEnable:SetChecked(HuntTrackerDB.enabled)
             end
@@ -300,13 +433,15 @@ end)
 
 minimapButton:SetScript("OnMouseDown", function(self, button)
     if button == "LeftButton" then
-        self.dragging = true
+        isDragging = true
+        SetOnUpdate(true)
     end
 end)
 
 minimapButton:SetScript("OnMouseUp", function(self, button)
     if button == "LeftButton" then
-        self.dragging = false
+        isDragging = false
+        RefreshOnUpdateState()
     end
 end)
 
@@ -326,87 +461,63 @@ minimapButton:SetScript("OnEnter", function(self)
     GameTooltip:Show()
 end)
 
-minimapButton:SetScript("OnLeave", function(self) GameTooltip:Hide() end)
+minimapButton:SetScript("OnLeave", function()
+    GameTooltip:Hide()
+end)
 
 -- =========================================================
 -- ON UPDATE
 -- =========================================================
-minimapButton:SetScript("OnUpdate", function(self, elapsed)
-    if self.dragging then
+MinimapButtonOnUpdate = function(self, elapsed)
+    if isDragging and HuntTrackerDB then
         local mx, my = Minimap:GetCenter()
         local px, py = GetCursorPosition()
         local scale = Minimap:GetEffectiveScale()
         px, py = px / scale, py / scale
-        local angle = math.deg(math.atan2(py - my, px - mx))
-        
-        if HuntTrackerDB then HuntTrackerDB.minimapButtonAngle = angle end
+        local angle = math_deg(math_atan2(py - my, px - mx))
+        HuntTrackerDB.minimapButtonAngle = angle
         UpdateMinimapButtonPosition()
     end
 
-    if not HuntTrackerDB or not HuntTrackerDB.enabled then return end
-
-    if targetTrackingID then
-        checkTimer = checkTimer + elapsed
-        if checkTimer >= 0.5 then
-            checkTimer = 0
-            
-            local currentID = GetCurrentTrackingID()
-            
-            if currentID ~= targetTrackingID then
-                local origSFX = GetCVar("Sound_EnableSFX")
-                UIErrorsFrame:UnregisterEvent("UI_ERROR_MESSAGE")
-                SetCVar("Sound_EnableSFX", "0") 
-                
-                if targetTrackingID == 0 then
-                    -- Если нужно выключить выслеживание
-                    if currentID ~= 0 then SetTracking(currentID) end -- Тут нюанс API 3.3.5, иногда 0 работает специфично, но оставим как было у тебя
-                    HuntTrackerDB.savedTrackingIndex = nil -- Очищаем память в базе
-                    targetTrackingID = nil
-                else
-                    SetTracking(targetTrackingID)
-                end
-                
-                SetCVar("Sound_EnableSFX", origSFX)
-                UIErrorsFrame:RegisterEvent("UI_ERROR_MESSAGE")
-            else
-                -- Если мы уже переключились на то, что хотели (например, вернулись к исходному)
-                -- Проверяем, вернулись ли мы к "запомненному" состоянию
-                if HuntTrackerDB.savedTrackingIndex == currentID then
-                    HuntTrackerDB.savedTrackingIndex = nil -- Очищаем память, миссия выполнена
-                    targetTrackingID = nil 
-                end
-            end
-        end
-    else
-        checkTimer = 0
+    if not HuntTrackerDB or not HuntTrackerDB.enabled or not targetTrackingID then
+        RefreshOnUpdateState()
+        return
     end
-end)
+
+    checkTimer = checkTimer - elapsed
+    if checkTimer <= 0 then
+        checkTimer = TRACK_ATTEMPT_INTERVAL
+        ApplyTrackingChange()
+    end
+end
 
 -- =========================================================
 -- СОБЫТИЯ
 -- =========================================================
-HuntTracker:SetScript("OnEvent", function(self, event, unit)
-    if event == "PLAYER_LOGIN" then
-        if not HuntTrackerDB then HuntTrackerDB = {} end
-        
-        for k, v in pairs(defaults) do
-            if HuntTrackerDB[k] == nil then 
-                HuntTrackerDB[k] = v 
-            end
+local function InitializeDefaults()
+    if not HuntTrackerDB then HuntTrackerDB = {} end
+    for k, v in pairs(defaults) do
+        if HuntTrackerDB[k] == nil then
+            HuntTrackerDB[k] = v
         end
+    end
+end
 
+HuntTracker:SetScript("OnEvent", function(self, event)
+    if event == "PLAYER_LOGIN" then
+        InitializeDefaults()
         BuildTrackingTable()
         UpdateMinimapButtonPosition()
         UpdateMinimapIcon()
-        UpdateLogic()             -- <--- добавь сюда
-
+        UpdateLogic()
     elseif event == "PLAYER_ENTERING_WORLD" then
         BuildTrackingTable()
-        UpdateLogic()             -- <--- и сюда
-
+        UpdateLogic()
     elseif event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_REGEN_ENABLED" then
         UpdateLogic()
-        checkTimer = 1
+    elseif event == "MINIMAP_UPDATE_TRACKING" or event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_TAB" then
+        BuildTrackingTable()
+        UpdateLogic()
     end
 end)
 
@@ -414,3 +525,6 @@ HuntTracker:RegisterEvent("PLAYER_LOGIN")
 HuntTracker:RegisterEvent("PLAYER_ENTERING_WORLD")
 HuntTracker:RegisterEvent("PLAYER_TARGET_CHANGED")
 HuntTracker:RegisterEvent("PLAYER_REGEN_ENABLED")
+HuntTracker:RegisterEvent("MINIMAP_UPDATE_TRACKING")
+HuntTracker:RegisterEvent("SPELLS_CHANGED")
+HuntTracker:RegisterEvent("LEARNED_SPELL_IN_TAB")
