@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: HuntTracker
-## Notes: Автоматически ставит нужное выслеживание охотника под цель
+## Notes: Auto switches Hunter tracking based on target
 ## Author: Ubivatb
-## Version: 2.4
+## Version: 2.5
 ## SavedVariablesPerCharacter: HuntTrackerDB
 
 HuntTracker.lua

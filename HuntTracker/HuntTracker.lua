@@ -6,18 +6,53 @@ if playerClass ~= "HUNTER" then
     return
 end
 
--- Настройки
+-- =========================================================
+-- ЛОКАЛИЗАЦИЯ (LOCALIZATION)
+-- =========================================================
+local L = {}
+local locale = GetLocale()
+
+if locale == "ruRU" then
+    -- RUSSIAN
+    L["ENABLED"] = "|cff00ff00HuntTracker: Включено|r"
+    L["DISABLED"] = "|cffff0000HuntTracker: Выключено|r"
+    L["TOOLTIP_TITLE"] = "HuntTracker"
+    L["STATUS_ON"] = "Автоотслеживание: |cff00ff00ВКЛ|r"
+    L["STATUS_OFF"] = "Автоотслеживание: |cffff0000ВЫКЛ|r"
+    L["HINT_RCLICK"] = "|cffffffffПКМ:|r"
+    L["HINT_RCLICK_TEXT"] = "Вкл/Выкл"
+    L["HINT_SHIFT"] = "|cffffffffShift+ЛКМ:|r"
+    L["HINT_SHIFT_TEXT"] = "Перетащить"
+else
+    -- ENGLISH (Default)
+    L["ENABLED"] = "|cff00ff00HuntTracker: Enabled|r"
+    L["DISABLED"] = "|cffff0000HuntTracker: Disabled|r"
+    L["TOOLTIP_TITLE"] = "HuntTracker"
+    L["STATUS_ON"] = "Auto Tracking: |cff00ff00ON|r"
+    L["STATUS_OFF"] = "Auto Tracking: |cffff0000OFF|r"
+    L["HINT_RCLICK"] = "|cffffffffRight Click:|r"
+    L["HINT_RCLICK_TEXT"] = "On/Off"
+    L["HINT_SHIFT"] = "|cffffffffShift+Left Click:|r"
+    L["HINT_SHIFT_TEXT"] = "Drag"
+end
+
+-- =========================================================
+-- НАСТРОЙКИ И ТАБЛИЦЫ
+-- =========================================================
+
 local settings
 local defaults = {
     enabled = true,
     minimapButtonAngle = 200,
 }
 
--- Таблицы типов существ
+-- Таблицы типов существ (смешанные ключи для поддержки обоих клиентов)
 local creatureTypeKey = {
+    -- English keys
     ["Beast"] = "Beast", ["Humanoid"] = "Humanoid", ["Undead"] = "Undead",
     ["Elemental"] = "Elemental", ["Demon"] = "Demon", ["Giant"] = "Giant",
     ["Dragonkin"] = "Dragonkin",
+    -- Russian keys
     ["Зверь"] = "Beast", ["Животное"] = "Beast", ["Животные"] = "Beast",
     ["Гуманоид"] = "Humanoid", ["Нежить"] = "Undead",
     ["Элементаль"] = "Elemental", ["Демон"] = "Demon",
@@ -25,6 +60,7 @@ local creatureTypeKey = {
     ["Дракон"] = "Dragonkin", ["Драконы"] = "Dragonkin",
 }
 
+-- Паттерны для поиска заклинаний в книге (уже поддерживают EN и RU)
 local trackingNamePatterns = {
     Beast = { "beast", "звер", "животн" },
     Humanoid = { "humanoid", "гуманоид" },
@@ -42,7 +78,9 @@ local savedTrackingIndex = nil
 local targetTrackingID = nil
 local checkTimer = 0
 
--- === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+-- =========================================================
+-- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+-- =========================================================
 
 local function GetCurrentTrackingID()
     local count = GetNumTrackingTypes()
@@ -86,7 +124,9 @@ local function GetWantedIndexForTarget()
     return trackIndexByKey[key]
 end
 
--- === ОСНОВНАЯ ЛОГИКА ===
+-- =========================================================
+-- ОСНОВНАЯ ЛОГИКА
+-- =========================================================
 
 local function UpdateLogic()
     if not settings or not settings.enabled then return end
@@ -108,7 +148,9 @@ local function UpdateLogic()
     end
 end
 
--- === МИНИКАРТА ===
+-- =========================================================
+-- МИНИКАРТА И UI
+-- =========================================================
 local minimapButton = CreateFrame("Button", "HuntTrackerMinimapButton", Minimap)
 minimapButton:SetFrameStrata("MEDIUM")
 minimapButton:SetSize(31, 31)
@@ -143,28 +185,34 @@ local function UpdateMinimapIcon()
     end
 end
 
+-- Клик по кнопке
 minimapButton:SetScript("OnClick", function(self, button)
     if button == "RightButton" then
         if not settings then return end
         settings.enabled = not settings.enabled
         UpdateMinimapIcon()
         if settings.enabled then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00HuntTracker: Включено|r")
+            DEFAULT_CHAT_FRAME:AddMessage(L["ENABLED"])
             UpdateLogic()
         else
-            DEFAULT_CHAT_FRAME:AddMessage("|cffff0000HuntTracker: Выключено|r")
+            DEFAULT_CHAT_FRAME:AddMessage(L["DISABLED"])
         end
     end
 end)
 
+-- Тултип
 minimapButton:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-    GameTooltip:AddLine("HuntTracker")
+    GameTooltip:AddLine(L["TOOLTIP_TITLE"])
+    GameTooltip:AddLine(" ")
     if settings.enabled then
-        GameTooltip:AddLine("|cff00ff00ВКЛЮЧЕНО|r")
+        GameTooltip:AddLine(L["STATUS_ON"])
     else
-        GameTooltip:AddLine("|cffff0000ВЫКЛЮЧЕНО|r")
+        GameTooltip:AddLine(L["STATUS_OFF"])
     end
+    GameTooltip:AddLine(" ")
+    GameTooltip:AddDoubleLine(L["HINT_RCLICK"], L["HINT_RCLICK_TEXT"], 1, 1, 1, 1, 1, 1)
+    GameTooltip:AddDoubleLine(L["HINT_SHIFT"], L["HINT_SHIFT_TEXT"], 1, 1, 1, 1, 1, 1)
     GameTooltip:Show()
 end)
 
@@ -181,8 +229,11 @@ minimapButton:SetScript("OnMouseUp", function(self, button)
     end
 end)
 
--- === ON UPDATE: СЕРДЦЕ АДДОНА (SILENT MODE) ===
+-- =========================================================
+-- ON UPDATE (ТИХИЙ РЕЖИМ ПЕРЕКЛЮЧЕНИЯ)
+-- =========================================================
 minimapButton:SetScript("OnUpdate", function(self, elapsed)
+    -- Перетаскивание
     if self.dragging then
         local mx, my = Minimap:GetCenter()
         local px, py = GetCursorPosition()
@@ -195,6 +246,7 @@ minimapButton:SetScript("OnUpdate", function(self, elapsed)
 
     if not settings or not settings.enabled then return end
 
+    -- Попытки переключения (Retry)
     if targetTrackingID then
         checkTimer = checkTimer + elapsed
         if checkTimer >= 0.5 then
@@ -203,10 +255,10 @@ minimapButton:SetScript("OnUpdate", function(self, elapsed)
             local currentID = GetCurrentTrackingID()
             
             if currentID ~= targetTrackingID then
-                -- Глушим ошибки UI и Звуки
+                -- Глушим ошибки UI и Звуки перед действием
                 local origSFX = GetCVar("Sound_EnableSFX")
                 UIErrorsFrame:UnregisterEvent("UI_ERROR_MESSAGE")
-                SetCVar("Sound_EnableSFX", "0") -- Выключаем звук ошибок
+                SetCVar("Sound_EnableSFX", "0") 
                 
                 -- Пытаемся сменить
                 if targetTrackingID == 0 then
@@ -232,7 +284,9 @@ minimapButton:SetScript("OnUpdate", function(self, elapsed)
     end
 end)
 
--- === СОБЫТИЯ ===
+-- =========================================================
+-- СОБЫТИЯ
+-- =========================================================
 HuntTracker:SetScript("OnEvent", function(self, event, unit)
     if event == "PLAYER_LOGIN" then
         if not HuntTrackerDB then HuntTrackerDB = {} end
@@ -247,7 +301,7 @@ HuntTracker:SetScript("OnEvent", function(self, event, unit)
         BuildTrackingTable()
     elseif event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_REGEN_ENABLED" then
         UpdateLogic()
-        checkTimer = 1 -- форсируем немедленную проверку
+        checkTimer = 1 -- форсируем проверку сразу
     end
 end)
 
