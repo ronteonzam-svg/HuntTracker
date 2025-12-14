@@ -6,9 +6,11 @@ if playerClass ~= "HUNTER" then
     return -- Если не охотник, выходим и не грузим аддон
 end
 
--- Простые настройки
-local settings = {
+-- SavedVariables (будет сохранено между /reload и выходом)
+local settings -- ссылка на HuntTrackerDB после загрузки
+local defaults = {
     enabled = true,
+    minimapButtonAngle = 200,
 }
 
 -- Приводим локализованные типы существ к общему ключу
@@ -87,7 +89,7 @@ local function TrySetTracking(idx)
 end
 
 local function UpdateTracking()
-    if not settings.enabled then return end
+    if not settings or not settings.enabled then return end
     local idx = GetWantedIndexForTarget()
     if idx then
         TrySetTracking(idx)
@@ -122,7 +124,7 @@ overlay:SetSize(53, 53)
 overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
 overlay:SetPoint("TOPLEFT")
 
-local minimapButtonAngle = 200
+local minimapButtonAngle = defaults.minimapButtonAngle
 
 local function UpdateMinimapButtonPosition()
     local angle = math.rad(minimapButtonAngle)
@@ -142,6 +144,7 @@ end
 -- ПКМ - включить/выключить
 minimapButton:SetScript("OnClick", function(self, button)
     if button == "RightButton" then
+        if not settings then return end
         settings.enabled = not settings.enabled
         UpdateMinimapIcon()
         if settings.enabled then
@@ -183,6 +186,9 @@ end)
 minimapButton:SetScript("OnMouseUp", function(self, button)
     if button == "LeftButton" then
         self.dragging = false
+        if settings then
+            settings.minimapButtonAngle = minimapButtonAngle
+        end
     end
 end)
 
@@ -210,6 +216,18 @@ end)
 
 HuntTracker:SetScript("OnEvent", function(self, event, unit)
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
+        -- Инициализация SavedVariables
+        if not HuntTrackerDB then HuntTrackerDB = {} end
+        for k, v in pairs(defaults) do
+            if HuntTrackerDB[k] == nil then
+                HuntTrackerDB[k] = v
+            end
+        end
+        settings = HuntTrackerDB
+
+        -- применяем сохранённые значения
+        minimapButtonAngle = settings.minimapButtonAngle or defaults.minimapButtonAngle
+
         BuildTrackingTable()
         UpdateMinimapButtonPosition()
         UpdateMinimapIcon()
