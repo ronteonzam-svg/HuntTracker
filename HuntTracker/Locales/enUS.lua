@@ -1,0 +1,19 @@
+local addonName, addon = ...
+local L = addon.L
+
+L["ENABLED"] = "|cff00ff00HuntTracker: Enabled|r"
+L["DISABLED"] = "|cffff0000HuntTracker: Disabled|r"
+L["TOOLTIP_TITLE"] = "HuntTracker"
+L["STATUS_ON"] = "Status: |cff00ff00ON|r"
+L["STATUS_OFF"] = "Status: |cffff0000OFF|r"
+L["HINT_LCLICK"] = "|cffffffffLeft Click (Hold):|r"
+L["HINT_LCLICK_TEXT"] = "Move"
+L["HINT_RCLICK"] = "|cffffffffRight Click:|r"
+L["HINT_RCLICK_TEXT"] = "Menu"
+L["HINT_SHIFT_RCLICK"] = "|cffffffffShift + Right Click:|r"
+L["HINT_SHIFT_RCLICK_TEXT"] = "Toggle On/Off"
+L["MENU_TITLE"] = "HuntTracker Settings"
+L["OPT_ENABLE"] = "Enable Addon"
+L["OPT_ONLYHOSTILE"] = "Only Hostile Targets"
+L["OPT_AUTORETURN"] = "Auto Return Tracking"
+L["OPT_DESC"] = "If 'Only Hostile' is unchecked, it will trigger on friendly NPCs too."

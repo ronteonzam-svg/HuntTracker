@@ -2,7 +2,10 @@
 ## Title: HuntTracker
 ## Notes: Auto switches Hunter tracking based on target
 ## Author: Ubivatb
-## Version: 2.6
+## Version: 2.7
 ## SavedVariablesPerCharacter: HuntTrackerDB
 
+HuntTracker_Init.lua
+Locales\enUS.lua
+Locales\ruRU.lua
 HuntTracker.lua
